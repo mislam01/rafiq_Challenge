@@ -1,0 +1,110 @@
+---
+Parameters:
+  InstanceName:
+    Type: String
+    Default: "ec2-test-web-server"
+  SSHKey:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Name of an existing EC2 KeyPair to enable SSH access to the instance
+    Default: rny-ec2-linux
+
+Resources:
+  EC2WebServer:
+    Type: AWS::EC2::Instance
+    # DeletionPolicy: Retain
+    Properties:
+      # AvailabilityZone: us-east-1a
+      ImageId: ami-0dfcb1ef8550277af # Amazon Linux 2 Kernel 5.10 AMI 2.0.20230207.0 x86_64 HVM gp2
+      InstanceType: t2.micro
+      KeyName: !Ref SSHKey
+      SecurityGroups:
+        - !Ref WebServerSecurityGroup
+      UserData: 
+        Fn::Base64:
+          !Sub |
+            #!/bin/bash -xe
+            # yum update -y
+            yum update -y aws-cfn-bootstrap ### Get the latest CloudFormation package
+
+            # Start cfn-init
+            /opt/aws/bin/cfn-init -s ${AWS::StackId} -r EC2WebServer --region ${AWS::Region}
+            # Start cfn-signal to the wait condition
+            /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource CfnSignalWaitCondition --region ${AWS::Region}
+
+      Tags: 
+        - Key: Name
+          Value: !Ref InstanceName
+    
+    Metadata:
+      Comment: Install a simple Apache HTTP page
+      AWS::CloudFormation::Init:
+        config:
+          packages:
+            yum:
+              httpd: []
+              mod_ssl: []
+          files:
+            "/var/www/html/index.html":
+              content: |
+                <html>
+                <head>
+                <title>Hello World</title>
+                </head>
+                <body>
+                <h1>Hello World!</h1>
+                </body>
+                </html>
+              mode: '000644'
+          commands:
+            generate_ssl:
+              command: "cd /etc/pki/tls/certs && ./make-dummy-cert localhost.crt"
+            configure_ssl:
+              command: |
+                cd /etc/httpd/conf.d
+                sed '/^SSLCertificateKeyFile/ s/./#&/' ssl.conf >ssl.conf.bak
+                mv ssl.conf.bak ssl.conf -f
+            test:
+              command: |
+                httpd_status=$(systemctl is-enabled httpd)
+                if [ "$httpd_status" != "enabled" ] ; then
+                  systemctl start httpd
+                  systemctl enable httpd
+                fi
+
+                systemctl start httpd && systemctl enable httpd
+                response=$(curl -k https://localhost --write-out %{http_code} --silent --output /dev/null)
+                echo http status code: $response >> /var/log/messages
+                if [ $response -eq 200 ] ; then
+                  echo The site is up. >> /var/log/messages
+                else
+                  echo The site is down or not functioning correctly. >> /var/log/messages
+                  exit 1
+                fi
+          # services:
+          #   sysvinit:
+          #     httpd:
+          #       enabled: 'true'
+          #       ensureRunning: 'true'
+
+  CfnSignalWaitCondition:
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT5M
+        Count: 1
+    Type: AWS::CloudFormation::WaitCondition
+
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    # DeletionPolicy: Retain
+    Properties:
+      GroupDescription: SSH and HTTP
+      SecurityGroupIngress:
+      - CidrIp: 0.0.0.0/0
+        FromPort: 22
+        IpProtocol: tcp
+        ToPort: 22
+      - CidrIp: 0.0.0.0/0
+        FromPort: 443
+        IpProtocol: tcp
+        ToPort: 443
+
